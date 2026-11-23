@@ -368,8 +368,7 @@ verify_dhcp_ignore() {
     [ "$_vdi_has" = "1" ] || return 1
     # 【2026-11-14 改】旁路由改为「自己发 RA 抢默认路由/DNS」，不再是「关 RA」。
     # 验的是 build 写进去的那套值，任一项不符就判需修复。
-    [ -z "$(run uci -q get dhcp.lan.ignore 2>/dev/null)" ] || return 1
-    [ "$(run uci -q get dhcp.lan.dhcpv4 2>/dev/null)" = "disabled" ] || return 1
+    [ "$(run uci -q get dhcp.lan.ignore 2>/dev/null)" = "1" ] || return 1
 # 【2026-11-23 用户定】不再校验/写 RA 相关项（彻底不管 IPv6）
 # 【2026-11-23 用户定】不再校验/写 RA 相关项（彻底不管 IPv6）
     # 【2026-11-15 用户定】dns_service 必须为空（删掉），靠 odhcpd 默认值 = true。
@@ -751,8 +750,8 @@ build_dhcp_ignore() {
     # 说明：ra_management / ra_flags 故意不写死，交给 odhcpd 默认值和 LuCI 控制。
     # 副作用是 odhcpd 默认 other-config 会让 O=1，设备会多发一次无用的
     # DHCPv6 Information-request（超时后回退到 RDNSS），不影响功能。
-    run uci -q delete dhcp.lan.ignore
-    run uci -q set dhcp.lan.dhcpv4='disabled'
+    # 【2026-11-23 用户定】LAN 不做 DHCP：用「忽略此接口」
+    run uci -q set dhcp.lan.ignore='1'
     # 【2026-11-23 用户定】不再写 dhcp.lan.ra（v6 由 98-ipv6-off.sh 首关一次）
     # 【2026-11-14 用户定】不写 dhcpv6：地址由 SLAAC 下发，不需要有状态 DHCPv6。
     # 实测（192.168.1.201）：dhcpv6 关着，Windows 一样从 RA 拿到 8c01 段地址
