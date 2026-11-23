@@ -19,7 +19,7 @@
 #   pkg-restore-apps.sh [--repair]  装回缺的那些，再复判一次
 #                                   0 = 全部在位；1 = 仍有缺（或装不上）
 #
-# 【2026-11-21 用户定】adblock 整套不装，故 _PA_ADBLOCK 组删除。
+# 【2026-11-23 用户定】adblock 整套不装，故 _PA_ADBLOCK 组删除。
 # localhost 本地解析规则仍保留在 smartdns custom.conf（smartdns-restore 03-localrule）。
 #
 # 判据主体是包管理器认不认。本版写死 apk（25.12 线只有 apk）：apk info -e。
@@ -230,9 +230,40 @@ _PA_LIST="${CS_PROBE_APPS:-$_PA_OC $_PA_CERT $_PA_DDNS $_PA_TOOLS $_PA_SSRP $_PA
 # 出厂没装过的会被 _pa_should 过滤掉（查 /rom/lib/apk/db/installed 的 P: 行），不会强加。
 _PA_DEPS="jansson4 libblkid1 libblobmsg-json20260213 libbpf1 libelf1 libgmp10 libjson-c5 libjson-script20260213 libltdl7 libmbedtls21 libmnl0 libmount1 libncurses6 libnetfilter-conntrack3 libnettle8 libnfnetlink0 libnftnl11 libnl-cli200 libnl-core200 libnl-genl200 libnl-nf200 libnl-route200 libnl-tiny1 libnl200 libopenssl3 libpcap1 libreadline8 libubox20260213 libubus20251202 libuci20250120 libucode20230711 libuuid1 libxml2-16 liblucihttp0 libcurl4 liblua5.4-5.4 liblzo2 libnghttp2-14 libruby3.4 libsqlite3-0 libuv1 libatomic1 libgcc1 libstdcpp6 libxtables12 kmod-usb-printer kmod-lp"
 
-# kmod 不写死：随内核版本变，直接从出厂库现取（201 实测 212 个，库内 212/212 都有 apk）
-_pa_kmods() {
-    grep -oE '^P:kmod-[A-Za-z0-9_.-]+' "$ROMDIR/lib/apk/db/installed" 2>/dev/null | sed 's/^P://'
+# kmod 不写死：随内核版本变，直接从出厂库现取。
+# 【2026-11-23 用户定】全量 kmod 已由 build25.sh 预装进固件（1199 个），所以这里
+# 现在会取到 1199 条 —— 保护面自动扩到全量，无需另维护名单。
+# 2026-11-19 时是 212 个（当时只保护出厂装过的那批）。
+# 【2026-11-23】kmod 全量预装后是 1,200+ 个，逐个 grep / 逐个 apk info 会让开机那次
+# --repair 白等好几秒。这里改成一次性集合运算（grep -x -F -f），与数量无关：
+#   期望 = 出厂库里的 kmod  ∩  本地包里真有 apk 的（装不回来的名字不进来）
+#   实有 = 运行侧已装快照里的 kmod
+#   缺的 = 期望 - 实有
+_pa_missing_kmods() {
+    _pa_snap_fact_build || return 0
+    _pa_snap_inst_build || return 0
+    _pa_mk_exp=/tmp/.pa-kmod-exp.$$
+    _pa_mk_have=/tmp/.pa-kmod-have.$$
+    _pa_mk_cache=/tmp/.pa-kmod-cache.$$
+    grep -E '^kmod-[A-Za-z0-9_.-]+$' "$_pa_snap_fact" | sort -u > "$_pa_mk_exp"
+    # 用库索引里的真名（adbdump），别用文件名正则：0.18-r1 这类版本会漏
+    if ! apk adbdump /rom/root/apk-cache/packages.adb 2>/dev/null | sed -n 's/^ *- name: *//p' \
+            | grep -E '^kmod-' | sort -u > "$_pa_mk_cache" || [ ! -s "$_pa_mk_cache" ]; then
+        ls /rom/root/apk-cache 2>/dev/null | sed -n 's/\.apk$//p' \
+            | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+.*$//' \
+            | grep -E '^kmod-' | sort -u > "$_pa_mk_cache"
+    fi
+    if [ -s "$_pa_mk_cache" ]; then
+        # busybox 没有 comm（2026-11-23 设备实测：-ash: comm: not found），
+        # 用 grep -x -F -f 做集合运算：交集 = 拿 l 当模式表过滤 e
+        grep -x -F -f "$_pa_mk_cache" "$_pa_mk_exp" > "$_pa_mk_exp.ok" 2>/dev/null
+    else
+        cp "$_pa_mk_exp" "$_pa_mk_exp.ok"
+    fi
+    grep -E '^kmod-[A-Za-z0-9_.-]+$' "$_pa_snap_inst" | sort -u > "$_pa_mk_have"
+    # 差集 = 把已装清单当模式表，反向过滤期望清单
+    grep -x -v -F -f "$_pa_mk_have" "$_pa_mk_exp.ok" 2>/dev/null
+    rm -f "$_pa_mk_exp" "$_pa_mk_cache" "$_pa_mk_exp.ok" "$_pa_mk_have"
 }
 
 # 【2026-11-19 用户定】开机补充组：**只走开机那一次 --repair**，不进 _PA_LIST / --check / --list。
@@ -263,14 +294,45 @@ _pa_missing_boot() {
 }
 
 # 依赖组里「该有却没有」的（只给 --repair 用；--check 不调它）
+# 【2026-11-23 用户定】全量保护：固件里装了什么，就保护什么（应用/库/kmod 一视同仁）。
+#   期望 = 出厂库(/rom)里所有包  ∩  本地库(/rom/root/apk-cache)真有 apk 的
+#   实有 = 运行侧已装快照
+#   缺的 = 期望 - 实有
+# 用 grep -x -F -f 做集合运算（busybox 没有 comm），与包数量无关。
+_pa_missing_all() {
+    _pa_snap_fact_build || return 0
+    _pa_snap_inst_build || return 0
+    _pa_a_exp=/tmp/.pa-all-exp.$$
+    _pa_a_have=/tmp/.pa-all-have.$$
+    _pa_a_cache=/tmp/.pa-all-cache.$$
+    _pa_a_ok=/tmp/.pa-all-ok.$$
+    grep -E '^[A-Za-z0-9]' "$_pa_snap_fact" | sort -u > "$_pa_a_exp"
+    # 同上：库内包名取索引真名（adbdump），失败才退回文件名正则
+    if ! apk adbdump /rom/root/apk-cache/packages.adb 2>/dev/null | sed -n 's/^ *- name: *//p' \
+            | grep -E '^[A-Za-z]' | sort -u > "$_pa_a_cache" || [ ! -s "$_pa_a_cache" ]; then
+        ls /rom/root/apk-cache 2>/dev/null | sed -n 's/\.apk$//p' \
+            | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+.*$//; s/-[0-9]{8,}.*$//; s/-r[0-9]+$//' \
+            | grep -E '^[A-Za-z]' | sort -u > "$_pa_a_cache"
+    fi
+    if [ -s "$_pa_a_cache" ]; then
+        grep -x -F -f "$_pa_a_cache" "$_pa_a_exp" > "$_pa_a_ok" 2>/dev/null
+    else
+        cp "$_pa_a_exp" "$_pa_a_ok"
+    fi
+    grep -E '^[A-Za-z0-9]' "$_pa_snap_inst" | sort -u > "$_pa_a_have"
+    grep -x -v -F -f "$_pa_a_have" "$_pa_a_ok" 2>/dev/null
+    rm -f "$_pa_a_exp" "$_pa_a_have" "$_pa_a_cache" "$_pa_a_ok"
+}
+
 _pa_missing_deps() {
-    _pa_md=""
-    for _pa_p in $_PA_DEPS $(_pa_kmods); do
+    # 库（45 个）：逐个判定，走 _pa_should + 已装
+    for _pa_p in $_PA_DEPS; do
         _pa_should "$_pa_p" || continue
         _pa_installed "$_pa_p" && continue
-        _pa_md="$_pa_md $_pa_p"
+        printf '%s\n' "$_pa_p"
     done
-    printf '%s\n' "$_pa_md" | sed 's/^ *//'
+    # kmod：1,200+ 个，一次性 comm 求差（见 _pa_missing_kmods）
+    _pa_missing_kmods
 }
 
 log() { printf '[APP] %s\n' "$*"; }
@@ -280,7 +342,42 @@ log() { printf '[APP] %s\n' "$*"; }
 
 # 24.10 线才需要 _PA_CACHE（opkg list-installed 是全表扫描，缓存后只跑一次）；
 # 25.12 的 apk info -e 直接问包数据库，不需要缓存，本文件不保留这个变量。
+# 【2026-11-23 用户定】全量 kmod 进了固件后，_pa_kmods 一次能取到 1199 个包。
+# 逐包 apk info -e / 逐包 grep 出厂库，光 fork 就够开机等 30 秒以上。
+# 所以这里各建一份快照，批量比对；快照拿不到（apk 参数不认识、解析失败）就退回
+# 老的逐包判定 —— 行为一致，只是慢一点，不会判错。
+_pa_snap_inst="/tmp/.pa-installed"
+_pa_snap_fact="/tmp/.pa-factory"
+
+# 已装包名快照：apk list --installed 优先，其次 apk info；行形如 busybox-1.36.1-r2
+_pa_snap_inst_build() {
+    [ -s "$_pa_snap_inst" ] && return 0
+    # 【2026-11-23】apk info 直接给纯包名，不需要再剥版本。
+    # 旧写法用 apk list --installed 再剥 -rN，遇到 luci-base-26.298.29275~c84adb9
+    # 这种 ~hash 版本剥不掉，导致 97 个包被误判缺失（真机实测）。
+    apk info 2>/dev/null | grep -E '^[A-Za-z0-9]' | sort -u > "$_pa_snap_inst"
+    # 自检：busybox / apk 必然在，认不出就是格式变了，整份作废
+    if grep -qxE 'busybox|apk' "$_pa_snap_inst"; then
+        return 0
+    fi
+    rm -f "$_pa_snap_inst"
+    return 1
+}
+
+# 出厂已装库快照（/rom 侧 P: 行），与 _pa_should 同源
+_pa_snap_fact_build() {
+    [ -s "$_pa_snap_fact" ] && return 0
+    sed -n 's/^P://p' "$ROMDIR/lib/apk/db/installed" 2>/dev/null | sort -u > "$_pa_snap_fact"
+    [ -s "$_pa_snap_fact" ]
+}
+
 _pa_installed() {
+    # ip 由 ip-full 提供（与 _pa_should 的别名表一致）
+    [ "$1" = "ip" ] && { _pa_installed ip-full; return; }
+    if _pa_snap_inst_build; then
+        grep -qxF "$1" "$_pa_snap_inst"
+        return
+    fi
     apk info -e "$1" >/dev/null 2>&1
 }
 
@@ -314,6 +411,18 @@ _pa_add_local() {
         apk add --no-network --allow-untrusted --force-overwrite "$1" >"$_pal_log" 2>&1
     fi
     _pal_rc=$?
+    # 【2026-11-23】索引里的 filename 与实际文件名不一致时（如
+    # kmod-ppdev-6.12.103-r1.3af3e693.apk），按名字装会报
+    # package mentioned in index not found；这里按文件路径再装一次。
+    if [ "$_pal_rc" != 0 ]; then
+        for _pf in /rom/root/apk-cache/"$1"-[0-9]*.apk; do
+            [ -e "$_pf" ] || continue
+            if apk add --allow-untrusted --force-overwrite "$_pf" >>"$_pal_log" 2>&1; then
+                _pal_rc=0
+                break
+            fi
+        done
+    fi
     rm -f "$_pal_log"
     return "$_pal_rc"
 }
@@ -328,7 +437,11 @@ _pa_should() {
     # 都会被判成「该有」。2026-10-29 真机复现：ssrp 组 5 个包被判缺失，第 3 轮
     # --repair 把 xray-core / xray-plugin 装了上去（运行时 624 vs 出厂 622）——
     # 这不是修复，是把用户没选的应用强加给机器。
-    grep -qxF "P:$1" "$ROMDIR/lib/apk/db/installed" 2>/dev/null && return 0
+    if _pa_snap_fact_build; then
+        grep -qxF "$1" "$_pa_snap_fact" && return 0
+    else
+        grep -qxF "P:$1" "$ROMDIR/lib/apk/db/installed" 2>/dev/null && return 0
+    fi
     # 【2026-11-19】别名表：白名单里写的是「能力名」，固件装的可能是另一个包名。
     # 实测：固件出厂的 /usr/bin/ip 来自 ip-full-6.18.0-r2，库里没有 P:ip 这一行，
     # 于是 --list 一直把 ip 显示成「固件未带」而被永久跳过（功能没坏，只是判据落空）。
@@ -420,6 +533,9 @@ _pa_missing() {
 _pa_check() {
     _pa_cm=$(_pa_missing)
     [ -n "$_pa_cm" ] && printf '%s\n' "$_pa_cm"
+    # 全量兜底：固件装过、但现在缺了的（含库与 kmod）
+    _pa_ca=$(_pa_missing_all)
+    [ -n "$_pa_ca" ] && printf '%s\n' "$_pa_ca"
     _pa_oc_bad=0
     if ! _pa_oc_files_ok; then
         printf 'openclash-core(文件缺失)\n'
@@ -520,9 +636,25 @@ _pa_repair() {
 		rm -rf /tmp/luci-modulecache/* 2>/dev/null
 		[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload >/dev/null 2>&1
 	fi
-    [ "$_pa_n" -gt 0 ] || log "无需装回（没有「该有却缺失」的应用）"
+    # 【2026-11-23】全量兜底：固件装过的一切（应用/库/kmod），缺了就按本地库装回
+    _pa_an=0
+    for _pa_p in $(_pa_missing_all); do
+        _pa_an=$((_pa_an + 1))
+        log "装回 $_pa_p（全量保护）"
+        if _pa_installed "$_pa_p"; then
+            "$_RESTORE" --force "$_pa_p" >/dev/null 2>&1 \
+                && log "装回完成 $_pa_p（强制重装）" \
+                || log "装回失败 $_pa_p（强制重装没成功）"
+        elif _pa_add_local "$_pa_p"; then
+            log "装回完成 $_pa_p（全量保护）"
+        else
+            log "装回失败 $_pa_p（本地包库没有它）"
+        fi
+    done
+    [ "$((_pa_n + _pa_an))" -gt 0 ] || log "无需装回（没有「该有却缺失」的包）"
     # 装完必须重判。apk 没有缓存，直接重算即可。
     [ -z "$(_pa_missing)" ] || return 1
+    [ -z "$(_pa_missing_all)" ] || return 1
     [ -z "$(_pa_missing_deps)" ] || return 1
     [ -z "$(_pa_missing_boot)" ] || return 1
     if ! _pa_oc_files_ok; then
