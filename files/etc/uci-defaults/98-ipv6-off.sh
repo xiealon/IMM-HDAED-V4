@@ -1,13 +1,11 @@
 #!/bin/sh
-# 【2026-11-23 用户定】旁路由没有 IPv6 上行，LAN 上不发 v6：
-# 关掉 RA / DHCPv6 / NDP 三个开关。这是**一次性开机脚本**（uci-defaults 语义）：
-# 每台设备首次开机执行一次，跑完自己删掉；之后你在 LuCI / uci 里改回 server 不会被覆盖。
+# 【2026-11-23 用户定】旁路由没有 IPv6 上行，LAN 上不发 v6。
+# 一次性开机脚本（uci-defaults 语义）：跑完自删；step.sh 已完全不碰 dhcp.lan.ra，
+# 所以之后你在 LuCI / uci 里改回 server 不会被覆盖。
 #
-# 想手动恢复（或以后要 v6）：
+# 手动恢复：
 #   uci set dhcp.lan.ra='server'; uci set dhcp.lan.dhcpv6='server'
 #   uci set dhcp.lan.ndp='server'; uci commit dhcp; /etc/init.d/odhcpd restart
-#   # 并且自行建 lan6：uci set network.lan6='interface' ...
-# 注：本脚本不写死 network.lan6，接口要自己加。
 [ -f /etc/config/dhcp ] || exit 0
 uci -q get dhcp.lan >/dev/null 2>&1 || exit 0
 
