@@ -1084,9 +1084,9 @@ echo "==> [apk-cache] 来源 C3（全量 kmod）：$_ak_c3 个 apk"
 # packages/official/ 里混着少量对官方内核编的包（例如 kmod-ip6-vti 就是 71cc 那份），
 # 它们装不进自建内核，还会被 _pa_kmods 当成"该有"，造成反复装回失败。
 # 判据：adbdump 里 kernel=6.12.x~<自建 hash>；hash 从 kernel-<ver>~<hash>-r1.apk 文件名取。
-_ak_kh=$(basename "$(ls "$_IB_PKGS"/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
+_ak_kh=$(basename "$(ls packages/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
     | sed -E 's/^kernel-[0-9.]+~([0-9a-f]+)-r1\.apk$/\1/')
-[ -n "$_ak_kh" ] || _ak_kh=$(basename "$(ls "$_IB_PKGS"/official/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
+[ -n "$_ak_kh" ] || _ak_kh=$(basename "$(ls packages/official/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
     | sed -E 's/^kernel-[0-9.]+~([0-9a-f]+)-r1\.apk$/\1/')
 echo "==> [kmod-policy] 自建内核 hash：${_ak_kh:-未知}"
 if [ -n "$_ak_kh" ] && [ -n "$_AK_BIN" ]; then
