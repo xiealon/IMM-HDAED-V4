@@ -1413,6 +1413,18 @@ if [ -n "$_AK_BIN" ] && [ -n "$_AK_IDX" ] && [ -d "$_IB_PKGS" ]; then
     # 为什么必须放在这一步而不是更早：上面「来源 A」的 packages/*.apk 通配会把根层
     # apk 全部拷进 /root/apk-cache 打进固件。1,384 个包会凭空多几百 MB。
     # 这里来源 A 早已跑完，建链接它看不见。
+# ---- 【2026-11-23 用户定】官方 kmod 一律不要，内核模块只认 packages/official/ ----
+# IB 自带的平铺 packages/kmod-*.apk 是对着**官方内核**编的，装进自建内核会 vermagic 不符；
+# 更糟的是它们会进索引，和 official/ 里的同名包抢求解（run #166 的 breaks 就是这么来的）。
+# 这里把平铺的 kmod 全删掉，索引里只剩 official/ 那套 26ed 的。
+_ak_drop_flat=0
+for _f in "$_IB_PKGS"/kmod-*.apk; do
+    [ -f "$_f" ] || continue
+    [ -L "$_f" ] && continue
+    rm -f "$_f"
+    _ak_drop_flat=$((_ak_drop_flat + 1))
+done
+echo "==> [kmod-policy] 删除 IB 自带（官方内核）kmod $_ak_drop_flat 个，索引只留 official/"
     _ib_ln_n=0
     for _f in "$_IB_PKGS"/official/*.apk; do
         [ -f "$_f" ] || continue
@@ -1518,7 +1530,115 @@ fi
 ls "$_AK_DIR" | head -n 20
 
 # ---- 唯一一遍：此时 files/ 里的包库已完整，一次合进 rootfs ----
-make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
+# ---- 两遍式：第 1 遍编出真实安装清单 → 补齐本地库 → 第 2 遍再编 ----
+# 【2026-11-23 用户定】本地库要全量备份（固件装过的应用/库都留一份 ipk/apk），
+# 但补库时**跳过 kmod**：官方 kmod 是对着官方内核编的，抓进来会污染本地库
+# （_pa_kmods 会拿到错的版本）。kmod 只由来源 C3（official/）提供。
+_ak_mk_image() {
+    _ak_mk_round=0
+    while :; do
+        make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE 2>&1 | tee /tmp/imm25-mk.log
+        _ak_mk_rc=${PIPESTATUS[0]}
+        [ "$_ak_mk_rc" = "0" ] && return 0
+        _ak_mk_round=$((_ak_mk_round + 1))
+        echo "==> [mk] make image 第 $_ak_mk_round 次失败（rc=$_ak_mk_rc）"
+        if [ "$_ak_mk_round" -gt 3 ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed (2nd pass)"
+            tail -n 40 /tmp/imm25-mk.log
+            exit 1
+        fi
+        _ak_drop=$(sed -nE 's/^ *([A-Za-z0-9_.+-]+) \(no such package\):.*/\1/p; s/.*world\[([A-Za-z0-9_.+-]+)\].*/\1/p' /tmp/imm25-mk.log | sort -u)
+        if [ -z "$_ak_drop" ]; then
+            echo "==> [mk] 没有「no such package / world[...]」类错误，不再重试"
+            tail -n 40 /tmp/imm25-mk.log
+            exit 1
+        fi
+        echo "==> [mk] 源里取不到，剔除：$(echo $_ak_drop | tr '\n' ' ')"
+        for _b in $_ak_drop; do
+            PACKAGES=$(echo $PACKAGES | tr ' ' '\n' | grep -vxF "$_b" | tr '\n' ' ')
+            if [ -f profiles.json ]; then
+                python3 - "$_b" <<'PY'
+import json, sys
+name = sys.argv[1]
+try:
+    d = json.load(open("profiles.json"))
+except Exception:
+    sys.exit(0)
+ch = False
+for prof in (d.get("profiles") or {}).values():
+    pk = prof.get("packages")
+    if isinstance(pk, list) and name in pk:
+        prof["packages"] = [x for x in pk if x != name]
+        ch = True
+if ch:
+    json.dump(d, open("profiles.json", "w"), ensure_ascii=False, indent=1)
+PY
+            fi
+        done
+    done
+}
+
+echo "==> [backup-all] 第 1 遍 make image（拿真实安装清单）"
+_ak_mk_image
+
+_man=$(ls bin/targets/x86/64/*.manifest 2>/dev/null | head -n1)
+if [ -n "$_man" ]; then
+    sed -n 's/^ *\([A-Za-z0-9][A-Za-z0-9_.+-]*\) .*/\1/p' "$_man" | sort -u > /tmp/installed.txt
+    echo "==> [backup-all] 清单来源 manifest：$(basename "$_man")"
+else
+    : > /tmp/installed.txt
+fi
+if [ "$(grep -c . /tmp/installed.txt 2>/dev/null || echo 0)" -lt 100 ]; then
+    _root=$(ls -d build_dir/target-*/root-x86 2>/dev/null | head -n1)
+    if [ -n "$_root" ] && [ -n "$_AK_BIN" ]; then
+        "$_AK_BIN" --root "$_root" info 2>/dev/null | awk '{print $1}' > /tmp/installed.txt
+        echo "==> [backup-all] 清单来源 apk info（$_root）"
+    fi
+fi
+
+_ak_inst_n=$(grep -c . /tmp/installed.txt 2>/dev/null) || _ak_inst_n=0
+if [ "$_ak_inst_n" -ge 100 ]; then
+    ls "$_AK_DIR" 2>/dev/null | sed -n 's/\.apk$//p' \
+        | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+.*$//; s/-[0-9]{8,}.*$//' | sort -u > /tmp/incache.txt
+    grep -x -v -F -f /tmp/incache.txt /tmp/installed.txt 2>/dev/null > /tmp/needbk.txt
+    _ak_need_n=$(grep -c . /tmp/needbk.txt 2>/dev/null) || _ak_need_n=0
+    echo "==> [backup-all] 装机 $_ak_inst_n 个包，本地库已有 $(grep -c . /tmp/incache.txt) 个，待补 $_ak_need_n 个（kmod 跳过）"
+
+    printf 'file://%s\n' "$(pwd)/$_AK_DIR/packages.adb" > /tmp/bk-repos.txt
+    cat repositories >> /tmp/bk-repos.txt 2>/dev/null
+
+    _bk_ok=0
+    _bk_bad=0
+    _bk_skip=0
+    while IFS= read -r _p; do
+        [ -n "$_p" ] || continue
+        case "$_p" in
+        kmod-*) _bk_skip=$((_bk_skip + 1)); continue ;;   # 关键：kmod 不走官方源
+        esac
+        if ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted --repositories-file /tmp/bk-repos.txt fetch "$_p" ) >/dev/null 2>&1; then
+            _bk_ok=$((_bk_ok + 1)); continue
+        fi
+        _f=$(find . -maxdepth 4 -name "$_p-[0-9]*.apk" 2>/dev/null | head -n1)
+        if [ -n "$_f" ]; then
+            cp -f "$_f" "$_AK_DIR"/ && _bk_ok=$((_bk_ok + 1))
+        else
+            _bk_bad=$((_bk_bad + 1))
+        fi
+    done < /tmp/needbk.txt
+    echo "==> [backup-all] 补齐 $_bk_ok 个，抓不到 $_bk_bad 个，跳过 kmod $_bk_skip 个"
+
+    if [ "$_bk_ok" -gt 0 ]; then
+        ( cd "$_AK_DIR" && ls *.apk 2>/dev/null | sed 's#^#./#' > /tmp/aklist.txt \
+          && rm -f packages.adb \
+          && "$_AK_BIN" --allow-untrusted "$_AK_IDX" -o packages.adb $(cat /tmp/aklist.txt) ) >/tmp/bk-index.log 2>&1 \
+          && echo "==> [backup-all] 库索引已重建（$(wc -c < "$_AK_DIR/packages.adb") 字节，$(ls "$_AK_DIR"/*.apk | wc -l) 个 apk）" \
+          || { echo "::warning::[backup-all] 库索引重建失败"; tail -5 /tmp/bk-index.log; }
+    fi
+else
+    echo "::warning::[backup-all] 拿不到安装清单（manifest/apk info 都失败），跳过全量备份"
+fi
+echo "==> [backup-all] 第 2 遍 make image（把补齐的包一起打进固件）"
+_ak_mk_image
 
 if [ $? -ne 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed (2nd pass: apk-cache)!"
