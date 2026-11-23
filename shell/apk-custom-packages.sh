@@ -24,7 +24,9 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box luci-compat kmod-tun kmod-ine
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openclash"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES -dnsmasq dnsmasq-full"
+# 【2026-11-24 用户定】整套不要 dnsmasq：DNS 走 smartdns（占 53），
+# DHCPv4 由上游主路由负责，LAN 上 dhcp.lan.ignore=1 不参与。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES -dnsmasq"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES yq kmod-dummy ca-bundle"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 # 【2026-11-02】mosdns 移除（用户定）：DNS 只留 smartdns 一层，占 53 做加速/分流/缓存。
