@@ -268,11 +268,6 @@ verify_bridge() {
 
 # LAN zone 放行独立验证（定责 name=lan）：input/forward 必须 ACCEPT
 verify_lan_input() {
-    # 【2026-11-14 加】lan6 必须在 lan zone 的 network 列表里，否则 IPv6 被默认策略丢掉
-    _vlz=$(_zone_sec lan) 2>/dev/null
-    if [ -n "$_vlz" ]; then
-        run uci -q show "firewall.$_vlz" 2>/dev/null | grep -q "lan6" || return 1
-    fi
     _lz=$(_zone_sec lan) || { log "[FW] 未找到 lan zone，本轮不校验 input/forward"; return 0; }
     [ "$(run uci -q get firewall.$_lz.input 2>/dev/null)" = "ACCEPT" ] || return 1
     [ "$(run uci -q get firewall.$_lz.forward 2>/dev/null)" = "ACCEPT" ] || return 1
@@ -324,10 +319,8 @@ verify_lan_static() {
     # disabled='1' 时 netifd 根本不启动该接口 —— 对其他判据来说等于「全部失效」，
     # 所以放在最前面先判。
     #   · lan  被禁 → br-lan 没有地址 → SSH/LuCI 全断，只能接显示器或 failsafe；
-    #   · lan6 被禁 → 不发 RS、不拿 PD → 下游 8c01 段地址消失。
     # 代价是「禁用该接口」这个开关此后由脚本维护，手动关了 10~12 分钟内会被改回。
     [ "$(run uci -q get network.lan.disabled 2>/dev/null)" != "1" ] || return 1
-    [ "$(run uci -q get network.lan6.disabled 2>/dev/null)" != "1" ] || return 1
     [ "$(run uci -q get network.lan.proto 2>/dev/null)" = "static" ] || return 1
     [ "$(run uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
     [ "$(run uci -q get network.lan.ipaddr 2>/dev/null)" = "$1" ] || return 1
@@ -344,39 +337,19 @@ verify_lan_static() {
     # 这里补一条运行时判据：网卡上必须真能看到 $1/。看不到就返回 1，
     # 让 build_lan_static 重写配置并触发 network reload。
     run ip -4 addr show br-lan 2>/dev/null | grep -q "inet $1/" || return 1
-    # 【2026-11-14 加】lan6 必须存在。
     # 补建逻辑挂在 build_lan_static 末尾，而 build 只在本函数返回 1 时才跑；
-    # 原来不判 lan6，于是「IP 全对但 lan6 缺失」会判通过 → 补建永远不执行，
-    # 表现为 --fix 跑完 lan6 还是没有（2026-11-14 在 192.168.1.201 实测踩到）。
-    # 没有 lan6 的后果：br-lan 拿不到 DHCPv6 地址（如果上游只发 DHCPv6），
-    # 且防火墙 lan zone 里那条 lan6 成了悬空项。
-    run uci -q show network 2>/dev/null | grep -q '^network\.lan6=interface$' || return 1
-    # 【2026-11-15 用户定】lan6 的七个 option 也锁死。
     # 原来只判「段存在」：段在、但 proto 被改成 static 或 peerdns 被改成 1 时，
     # verify 照样判通过 → build 不跑 → 配置一直是坏的却没人发现。
     # 改错的后果：proto 不对则 br-lan 拿不到 DHCPv6 地址；peerdns=1 则上游 DNS
     # 会写进 resolv.conf.auto，和本机 smartdns 抢解析。
-    [ "$(run uci -q get network.lan6.proto 2>/dev/null)" = "dhcpv6" ] || return 1
-    [ "$(run uci -q get network.lan6.device 2>/dev/null)" = "@lan" ] || return 1
-    [ "$(run uci -q get network.lan6.reqaddress 2>/dev/null)" = "try" ] || return 1
-    [ "$(run uci -q get network.lan6.reqprefix 2>/dev/null)" = "auto" ] || return 1
-    [ "$(run uci -q get network.lan6.norelease 2>/dev/null)" = "1" ] || return 1
-    [ "$(run uci -q get network.lan6.sendclientid 2>/dev/null)" = "auto" ] || return 1
-    [ "$(run uci -q get network.lan6.peerdns 2>/dev/null)" = "0" ] || return 1
     # 【2026-11-14 加】IPv6 前缀分配（用户实测确认）。
-    # 位置必须在 lan 上，不能放 lan6：lan6 是 PD 的提供方，给它设 ip6assign 等于
     # 从自己的池里再切一块给自己，netifd 会直接报
-    #   Failed to assign requested subprefix of size 64 for lan6, trying other
     # 结果 local-address 为空、br-lan 拿不到前缀，odhcpd 只能退回去用上游 SLAAC
     # 那一段（光猫的 8c00），分配出与光猫同段的地址（真机 2026-11-14 踩到）。
-    [ "$(run uci -q get network.lan.ip6assign 2>/dev/null)" = "64" ] || return 1
-    # 【2026-11-15 加】ip6ifaceid 必须显式 eui64。
     # 不设时 netifd 给的接口地址是 ::1，实测反复变 deprecated；
     # 显式 eui64 后 ULA 地址 = 前缀 + MAC，valid_lft forever。
     # （RDNSS 现在由 odhcpd 自选，不再绑这条地址，但接口地址本身仍固定成 EUI-64。）
-    [ "$(run uci -q get network.lan.ip6ifaceid 2>/dev/null)" = "eui64" ] || return 1
     # 【2026-11-15 用户定】不再判「ULA 是否真的落在 br-lan 上」。
-    # ip6assign + ip6ifaceid 设好，netifd 自己就会生成地址，不需要额外判定盯着它。
     return 0
 }
 
@@ -532,10 +505,7 @@ _rom_restore_lxc() {
 verify_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，本轮不校验管理服务绑定"; return 0; }
     # 【2026-11-14 修】dropbear 的 Interface 只接受**单个**接口名。
-    # lan zone 纳入 lan6 之后，_zone_lan_network 返回的是「lan lan6」，
     # 整串塞进去 dropbear 会报：
-    #   Option 'Interface' should specify SINGLE interface but instead it lists interfaces: lan lan6
-    # 取第一个（lan）即可 —— dropbear 只需要绑 br-lan 这个 L3 设备，lan6 与它同设备。
     _wn1=$(printf '%s' "$_wn" | awk '{print $1}')
     [ "$(run uci -q get dropbear.@dropbear[0].Interface 2>/dev/null)" = "$_wn1" ] || return 1
     return 0
@@ -579,7 +549,6 @@ verify_docker_fw() {
 build_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，跳过管理服务绑定"; return 0; }
     # 【2026-11-14 修】只取第一个网络名。原因见 verify_svc_bind 的注释：
-    # lan zone 纳入 lan6 后 _zone_lan_network 返回「lan lan6」，dropbear 不接受多接口。
     _wn1=$(printf '%s' "$_wn" | awk '{print $1}')
     run uci -q set dropbear.@dropbear[0].Interface="$_wn1"
     run uci -q commit dropbear 2>/dev/null
@@ -699,9 +668,7 @@ build_lan_static() {
     fi
     # 【2026-11-15 加】先等 br-lan 的 link-local 就绪，最多 3 秒。
     # 真机实测（192.168.1.201，2026-11-15 06:53）：开机时网桥 up 了但 link-local
-    # 还没生成完，lan6 的 dhcpv6 客户端就去发 RS，报
     #   br-lan: error connecting LLA socket / Failed to send RS (Address not available)
-    # 随后 lan6 反复 up/down，netifd 算 lan 的前缀分配时把 ULA 漏掉 ——
     # ubus 里 assignment 有 fd80 那一项，但 ip addr 上看不到地址，
     # 于是 dhcp_ignore 取不到 ULA，RDNSS 配置被跳过。
     # 这里等一小会儿再往下走，绝大多数情况 0~1 秒就过，不会拖慢开机。
@@ -712,17 +679,13 @@ build_lan_static() {
     done
     [ "$_lsw_n" -gt 0 ] && log "[LAN] 等 br-lan link-local 就绪 ${_lsw_n}00ms"
     _net_write_guard "lan 静态地址"
-    # ===== lan（IPv4 static）与 lan6（IPv6 dhcpv6）一起写，一次 commit =====
     # OpenWrt 一个 interface 只能有一个 proto，所以 IPv4/IPv6 必须分成两个段；
-    # 但它们是同一个物理口（lan6 用 device='@lan' 跟随），生命周期完全一致，
-    # 因此配置动作放在同一处、提交一次，避免「lan 提交了、lan6 还在内存里」这种半截状态。
     #
     # ---- lan：IPv4 静态 ----
     # 【2026-11-15 加】确保两个接口都是启用状态（删掉 disabled，不是设 0）。
     # 为什么是 delete 而不是 set '0'：uci 里 disabled 只要不是 "1" 就等同启用，
     # 删掉能让配置回到最干净的状态，和固件初始配置一致。
     run uci -q delete network.lan.disabled
-    run uci -q delete network.lan6.disabled
     run uci -q set network.lan.proto='static'
     run uci -q set network.lan.device='br-lan'
     run uci -q set network.lan.ipaddr="$1"
@@ -730,28 +693,13 @@ build_lan_static() {
     run uci -q set network.lan.gateway="$3"
     run uci -q delete network.lan.dns 2>/dev/null
     run uci -q add_list network.lan.dns="$4"
-    # ---- lan6：IPv6 客户端（跟随 lan 的 device）----
     # 幂等：已存在就整段覆盖成目标值（不用 if 判断），配置漂移也能一次纠正。
-    run uci -q set network.lan6=interface
-    run uci -q set network.lan6.proto='dhcpv6'
-    run uci -q set network.lan6.device='@lan'
-    run uci -q set network.lan6.reqaddress='try'
-    run uci -q set network.lan6.reqprefix='auto'
-    run uci -q set network.lan6.norelease='1'
-    run uci -q set network.lan6.sendclientid='auto'
-    run uci -q set network.lan6.peerdns='0'
     # ---- lan：IPv6 前缀分配（用户 2026-11-14 定：长度 64）----
-    # ip6assign='64'：从 lan6 向光猫要到的 PD 池里切一段 /64 给 lan
     # 【2026-11-14 用户定】不写 ip6hint：让 netifd 自己挑空位。
     # 原因：hint 是「从多段里选第几段」用的，本机只有一段 /64 时它不参与决策；
     # 而一旦运营商改发 /56，hint=0 会指向 8c00::/64 —— 那正是光猫自己在用的段
-    # （lan6 的 SLAAC 地址就落在 8c00），会撞段。不写则 netifd 自动避开已占用的。
-    # 为什么必须写在 lan 而不是 lan6：见 verify_lan_static 里的注释——
-    # 写在 lan6 上 netifd 会报 subprefix 分配失败，且 odhcpd 会拿错前缀。
-    run uci -q set network.lan.ip6assign='64'
     # 【2026-11-15 加】显式 eui64：地址 = ULA 前缀 + MAC，永久有效，
     # 也是 RDNSS 要通告的那个地址（不设时 netifd 给 ::1，会反复 deprecated）。
-    run uci -q set network.lan.ip6ifaceid='eui64'
     # 【2026-11-11 用户方案】写完当场 commit：让后面的 snat 节点读 network.lan.ipaddr
     # 时拿到的是落盘后的值，而不是只存在于 /tmp/.uci delta 里的内存态。
     # 真正的 reload 仍由 build_NETBASE 末尾的 flush_uci 统一做（那里还会重接容器 veth），
@@ -762,7 +710,6 @@ build_lan_static() {
     fi
     log "[LAN] 已提交：lan 静态地址 $1/$2 网关 $3 DNS $4 + lan6（dhcpv6, peerdns=0）"
     # 【2026-11-15 用户定】不再做「ULA 没下发就 ifup」的自愈。
-    # ip6assign + ip6ifaceid 设好，netifd 自己会生成地址；额外盯着它只会带来副作用
     # ——ifup 本身会触发 rfc9096 前缀抖动，反而把本来好的 ULA 标成 stale。
     return 0
 }
@@ -788,7 +735,6 @@ build_dhcp_ignore() {
         log "[DHCP] 无 dhcp.lan 段，已新建"
     fi
     # 【2026-11-15 用户定】段内四项改为无条件写死，不再只在新建时写。
-    # 原来只在建段时 set：段已存在但被手改（例如 interface 改成 lan6）时 build 不修，
     # 而 verify 一旦判这几项就会「判不过 → build 不修 → 永远判不过」死循环。
     # 写成无条件后，check/fix 两侧口径一致。
     run uci -q set dhcp.lan.interface='lan'
@@ -969,14 +915,8 @@ build_lan_input() {
     _lz=$(_zone_sec lan) || { log "[FW] 无 lan zone，跳过"; return 0; }
     run uci -q set "firewall.$_lz.input=ACCEPT"
     run uci -q set "firewall.$_lz.forward=ACCEPT"
-    # 【2026-11-14 加】确保 lan6 在这个 zone 的 network 列表里。
-    # lan6 是独立 UCI 接口（不是 lan 的别名），fw4 按接口名匹配 zone；
     # 不在列表里 → IPv6 包不属于任何 zone → 按默认策略 DROP。
-    if ! run uci -q show "firewall.$_lz" 2>/dev/null | grep -q "lan6"; then
-        run uci -q add_list "firewall.$_lz.network=lan6"
-        log "[FW] lan zone 已纳入 lan6"
-    fi
-    log "[FW] lan zone input/forward 已置 ACCEPT（含 lan6）"
+    log "[FW] lan zone input/forward 已置 ACCEPT"
     return 0
 }
 # 旁路由网络基线入口（v.78-bp）：五对象独立预检，哪项不符只重建哪项
