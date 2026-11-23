@@ -1079,6 +1079,30 @@ for _f in packages/official/kmod-*.apk; do
     cp -f "$_f" "$_AK_DIR"/ && _ak_c3=$((_ak_c3 + 1))
 done
 echo "==> [apk-cache] 来源 C3（全量 kmod）：$_ak_c3 个 apk"
+
+# ---- 【2026-11-23 用户定】库里只允许「自建内核编的」kmod ----
+# packages/official/ 里混着少量对官方内核编的包（例如 kmod-ip6-vti 就是 71cc 那份），
+# 它们装不进自建内核，还会被 _pa_kmods 当成"该有"，造成反复装回失败。
+# 判据：adbdump 里 kernel=6.12.x~<自建 hash>；hash 从 kernel-<ver>~<hash>-r1.apk 文件名取。
+_ak_kh=$(basename "$(ls "$_IB_PKGS"/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
+    | sed -E 's/^kernel-[0-9.]+~([0-9a-f]+)-r1\.apk$/\1/')
+[ -n "$_ak_kh" ] || _ak_kh=$(basename "$(ls "$_IB_PKGS"/official/kernel-6.12.*-r1.apk 2>/dev/null | head -n1)" 2>/dev/null \
+    | sed -E 's/^kernel-[0-9.]+~([0-9a-f]+)-r1\.apk$/\1/')
+echo "==> [kmod-policy] 自建内核 hash：${_ak_kh:-未知}"
+if [ -n "$_ak_kh" ] && [ -n "$_AK_BIN" ]; then
+    _ak_kbad=0
+    _ak_kkeep=0
+    for _f in "$_AK_DIR"/kmod-*.apk; do
+        [ -f "$_f" ] || continue
+        if "$_AK_BIN" adbdump "$_f" 2>/dev/null | grep -q "kernel=6\.12\.[0-9]*~${_ak_kh}"; then
+            _ak_kkeep=$((_ak_kkeep + 1))
+        else
+            rm -f "$_f"
+            _ak_kbad=$((_ak_kbad + 1))
+        fi
+    done
+    echo "==> [kmod-policy] 库内 kmod 保留 $_ak_kkeep 个（${_ak_kh}），清掉非自建内核 $_ak_kbad 个"
+fi
 # 收 0 个说明 packages/official/ 没就位（workflow 的 1688 包全集那步没跑或路径变了），
 # 那样本库就救不了 kmod，必须当场失败，别把一个「看着成功」的固件发出去。
 if [ "$_ak_c3" -lt 100 ]; then
