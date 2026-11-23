@@ -11,6 +11,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false     # 关键：不持久化 GITHUB_TOKEN，否则 push 会以 bot 身份被拒
 
       - name: Clone source at baseline
         run: |
@@ -28,7 +29,7 @@ jobs:
         run: |
           git config user.name  "baseline-bot"
           git config user.email "baseline-bot@users.noreply.github.com"
-          # 用 PAT 推：GITHUB_TOKEN 没有 workflows 权限，推 .github/workflows/* 会被拒
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${SYNC_PAT}@github.com/xiealon/IMM-HDAED-V4.git"
           git add -A
           git commit -m "旁路由基线：整仓搬运自 IMM-HDAED-V6@d118843aa8" || echo "无需提交"
