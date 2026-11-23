@@ -3,9 +3,6 @@ name: import baseline from V6
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   import:
     runs-on: ubuntu-latest
@@ -18,19 +15,21 @@ jobs:
       - name: Clone source at baseline
         run: |
           git clone https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/xiealon/IMM-HDAED-V6.git /tmp/src
-          cd /tmp/src
-          git checkout d118843aa8
+          cd /tmp/src && git checkout d118843aa8
 
       - name: Copy tree
         run: |
           rsync -a --exclude='.git' --exclude='.github/workflows/import-baseline.yml' /tmp/src/ ./
-          ls -la | head -20
           echo "文件数: $(find . -type f -not -path './.git/*' | wc -l)"
 
-      - name: Commit and push
+      - name: Commit and push (via PAT)
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
         run: |
           git config user.name  "baseline-bot"
           git config user.email "baseline-bot@users.noreply.github.com"
+          # 用 PAT 推：GITHUB_TOKEN 没有 workflows 权限，推 .github/workflows/* 会被拒
+          git remote set-url origin "https://x-access-token:${SYNC_PAT}@github.com/xiealon/IMM-HDAED-V4.git"
           git add -A
           git commit -m "旁路由基线：整仓搬运自 IMM-HDAED-V6@d118843aa8" || echo "无需提交"
           git push origin HEAD:main
