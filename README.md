@@ -1,4 +1,5 @@
 # IMM-HDAED-V4
+## 只配置了V4网络的旁路模式的X86-64固件 ##
 
 # 特殊提示:
 若未在action的enroll处填入key
@@ -20,8 +21,6 @@
 在 honk 组之外，这条线额外带 daed 组：`daed` / `daed-geoip` / `daed-geosite` / `luci-app-daed` / `luci-i18n-daed-zh-cn` / `kmod-xdp-sockets-diag`，固件内共 **586** 个包。纯 honk 版见 [`ImmortalWrt-ImageBuilder-25.12`](https://github.com/xiealon/ImmortalWrt-ImageBuilder-25.12)。
 
 固件本体仍是 ImmortalWrt 25.12.2 x86-64，和 `ImmortalWrt-ImageBuilder-25.12` 一样的 CrowdSec LXC、一样的 rootfs-skel、一样的网络校验脚本。差别只在**内核和 apk 来源**。
-
-##只配置了V4网络的旁路模式的X86-64固件##
 
 **完整的 CrowdSec LXC 运行期逻辑、网络与防火墙校验、`rootfs-skel` 契约 → [CROWDSEC.md](https://github.com/xiealon/ImmortalWrt-ImageBuilder-25.12/blob/master/CROWDSEC.md)；v.103 起的改动记录 → [CHANGELOG.md](https://github.com/xiealon/ImmortalWrt-ImageBuilder-25.12/blob/master/CHANGELOG.md)**
 
